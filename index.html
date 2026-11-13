@@ -514,7 +514,7 @@ const st = {
   view: null, card: null, player: null, phase: 'idle', token: 0,
   started: false, ended: false, wantPlay: false,
   pendingSeek: null, pendingSeekAt: 0,
-  tick: null, tBuffer: null, tAttempt: null, tSlow: null,
+  tick: null, tBuffer: null, tAttempt: null, tSlow: null, tWatch: null, revealed: false,
 };
 
 /* ---------- Hilfsfunktionen ---------- */
@@ -689,7 +689,6 @@ const POSTER = {
   loading: 'Lädt …',
   ready: finePointer ? 'Klicken oder Leertaste drücken' : 'Tippen zum Abspielen',
   buffering: 'Gleich geht’s los …',
-  ad: 'Gleich geht’s los – vorher läuft eventuell kurz Werbung.',
   tap: 'Bitte direkt auf das Bild tippen bzw. klicken.',
   slow: 'Das dauert ungewöhnlich lange … notfalls die Seite neu laden.',
 };
@@ -727,6 +726,7 @@ function createPlayer(YT, card, token) {
         clearTimeout(st.tSlow);
         try { const f = st.player.getIframe(); f.title = 'Filmszene'; f.setAttribute('tabindex', '-1'); } catch (_) {}
         if (st.phase === 'loading') setPhase('ready');
+        watchStart();
       },
       onStateChange: (ev) => { if (token === st.token) onState(ev.data); },
       onError: (ev) => { if (token === st.token) showError(ev.data); },
@@ -734,16 +734,36 @@ function createPlayer(YT, card, token) {
   });
 }
 
+// Sicherheitsnetz: Meldet YouTube den Start verspätet oder gar nicht, erkennen wir ihn selbst am Player-Zustand.
+function watchStart() {
+  if (st.tWatch || st.started) return;
+  const token = st.token;
+  st.tWatch = setInterval(() => {
+    if (token !== st.token || st.started || !st.player) { stopWatch(); return; }
+    let s = -1;
+    try { s = st.player.getPlayerState(); } catch (_) {}
+    if (s === 1) onState(1);
+  }, 250);
+}
+function stopWatch() { clearInterval(st.tWatch); st.tWatch = null; }
+// Bild freigeben, obwohl die Szene noch nicht läuft (Werbung oder langsames Laden). Der Titel bleibt trotzdem verdeckt.
+function revealEarly() {
+  st.revealed = true;
+  hidePoster();
+}
+
 function onState(s) {
   const S = window.YT.PlayerState;
   if (!st.card || !st.player || st.phase === 'error' || st.phase === 'notice') return;
   if (s === S.PLAYING) {
-    clearTimeout(st.tBuffer); clearTimeout(st.tAttempt);
+    clearTimeout(st.tBuffer); clearTimeout(st.tAttempt); stopWatch();
     if (st.ended && !st.wantPlay) { try { st.player.pauseVideo(); } catch (_) {} return; }
     st.wantPlay = false;
     if (!st.started) {
       st.started = true;
-      if (st.card.s && curTime() < st.card.s - 1) seek(st.card.s);
+      // Nur falls YouTube die Startzeit ignoriert hat, kurz danach nachkorrigieren (nicht sofort, das kostet sonst Ladezeit)
+      const token = st.token, s0 = st.card.s;
+      if (s0) setTimeout(() => { if (token === st.token && st.phase === 'playing' && st.pendingSeek == null && curTime() < s0 - 1.5) seek(s0); }, 900);
       releaseFocus();
       hideCaptions();
       setTimeout(hideCaptions, 1200);
@@ -752,9 +772,11 @@ function onState(s) {
     setPhase('playing');
   } else if (s === S.BUFFERING) {
     if (!st.started) {
-      setPoster('buffering');
+      if (!st.revealed) setPoster('buffering');
+      watchStart();
       clearTimeout(st.tBuffer);
-      st.tBuffer = setTimeout(() => { if (!st.started && st.phase !== 'error') setPoster('ad'); }, 3500);
+      // Dauert der Start länger (meist Werbung vor dem Video), Bild freigeben: Werbung und „Überspringen“ sind dann sichtbar
+      st.tBuffer = setTimeout(() => { if (!st.started && st.phase === 'ready') revealEarly(); }, 2000);
     }
   } else if (s === S.PAUSED) {
     if (st.ended) setPhase('ended');
@@ -783,7 +805,7 @@ function play() {
   try { st.player.playVideo(); } catch (_) {}
   if (!st.started) {
     clearTimeout(st.tAttempt);
-    st.tAttempt = setTimeout(() => { if (!st.started && st.phase === 'ready') setPoster('tap'); }, 1600);
+    st.tAttempt = setTimeout(() => { if (!st.started && !st.revealed && st.phase === 'ready') setPoster('tap'); }, 1600);
   }
 }
 function pause() {
@@ -889,7 +911,7 @@ function errorText(code) {
 }
 function stopAll() {
   stopTick();
-  clearTimeout(st.tBuffer); clearTimeout(st.tAttempt); clearTimeout(st.tSlow);
+  clearTimeout(st.tBuffer); clearTimeout(st.tAttempt); clearTimeout(st.tSlow); stopWatch();
   hidePoster();
   els.shield.classList.remove('on');
 }
@@ -948,7 +970,7 @@ function teardown() {
   stopAll();
   try { if (st.player && st.player.destroy) st.player.destroy(); } catch (_) {}
   st.player = null; st.card = null;
-  st.started = false; st.ended = false; st.wantPlay = false; st.pendingSeek = null;
+  st.started = false; st.ended = false; st.wantPlay = false; st.pendingSeek = null; st.revealed = false;
   els.ytbox.replaceChildren();
   document.body.classList.remove('is-playing');
   hideCurtain();
